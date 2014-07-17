@@ -1,8 +1,11 @@
+# -*- coding: utf-8 -*-
 from __future__ import unicode_literals
+import decimal
 import json
 
+from django.contrib.auth import logout
 from django.contrib import messages
-from django.core.urlresolvers import reverse_lazy
+from django.core.urlresolvers import reverse_lazy, reverse
 from django.http import HttpResponse
 from django.shortcuts import render, redirect
 from django.views.generic import DetailView
@@ -23,6 +26,8 @@ from .models import Customer
 from .models import Event
 from .models import EventProcessingException
 from .settings import PLAN_LIST
+from .settings import CANCELLATION_AT_PERIOD_END
+from .settings import PRORATION_POLICY_FOR_UPGRADES
 from .settings import PY3
 from .settings import User
 from .sync import sync_customer
@@ -61,25 +66,36 @@ class ChangeCardView(LoginRequiredMixin, PaymentsContextMixin, DetailView):
                 }
             )
         messages.info(request, "Your card is now updated.")
-        return redirect("djstripe:account")
+        return redirect(self.get_post_success_url())
+
+    def get_post_success_url(self):
+        """ Makes it easier to do custom dj-stripe integrations. """
+        return reverse("djstripe:account")
 
 
-class CancelSubscriptionView(LoginRequiredMixin, PaymentsContextMixin, FormView):
+class CancelSubscriptionView(LoginRequiredMixin, SubscriptionMixin, FormView):
     # TODO - needs tests
     template_name = "djstripe/cancel_subscription.html"
     form_class = CancelSubscriptionForm
+    success_url = reverse_lazy("djstripe:account")
 
     def form_valid(self, form):
         customer, created = Customer.get_or_create(self.request.user)
-        # TODO - pass in setting to control at_period_end boolean
-        current_subscription = customer.cancel_subscription(at_period_end=True)
+        current_subscription = customer.cancel_subscription(at_period_end=CANCELLATION_AT_PERIOD_END)
         if current_subscription.status == current_subscription.STATUS_CANCELLED:
-            messages.info(self.request, "Your account is now cancelled.")
+            # If no pro-rate, they get kicked right out.
+            messages.info(self.request, "Your subscription is now cancelled.")
+            # logout the user
+            logout(self.request)
+            return redirect("home")
         else:
-            messages.info(self.request, "Your account status is now '{}'".format(
-                current_subscription.status)
+            # If pro-rate, they get some time to stay.
+            messages.info(self.request, "Your subscription status is now '{a}' until '{b}'".format(
+                    a=current_subscription.status, b=current_subscription.current_period_end
+                )
             )
-        return redirect("djstripe:account")
+
+        return super(CancelSubscriptionView, self).form_valid(form)
 
 
 class WebHook(CsrfExemptMixin, View):
@@ -122,11 +138,14 @@ class HistoryView(LoginRequiredMixin, SelectRelatedMixin, DetailView):
 
 
 class SyncHistoryView(CsrfExemptMixin, LoginRequiredMixin, View):
+
+    template_name = "djstripe/includes/_history_table.html"
+
     # TODO - needs tests
     def post(self, request, *args, **kwargs):
         return render(
             request,
-            "djstripe/includes/_history_table.html",
+            self.template_name,
             {"customer": sync_customer(request.user)}
         )
 
@@ -199,7 +218,27 @@ class ChangePlanView(LoginRequiredMixin,
         customer = request.user.customer
         if form.is_valid():
             try:
-                customer.subscribe(form.cleaned_data["plan"])
+                """
+                When a customer upgrades their plan, and PRORATION_POLICY_FOR_UPGRADES is set to True,
+                then we force the proration of his current plan and use it towards the upgraded plan,
+                no matter what PRORATION_POLICY is set to.
+                """
+                if PRORATION_POLICY_FOR_UPGRADES:
+                    current_subscription_amount = customer.current_subscription.amount
+                    selected_plan_name = form.cleaned_data["plan"]
+                    selected_plan = next(
+                        (plan for plan in PLAN_LIST if plan["plan"] == selected_plan_name)
+                    )
+                    selected_plan_price = selected_plan["price"]
+                    if not isinstance(selected_plan["price"], decimal.Decimal):
+                        selected_plan_price = selected_plan["price"] / decimal.Decimal("100")
+                    """ Is it an upgrade """
+                    if selected_plan_price > current_subscription_amount:
+                        customer.subscribe(selected_plan_name, prorate=True)
+                    else:
+                        customer.subscribe(selected_plan_name)
+                else:
+                    customer.subscribe(form.cleaned_data["plan"])
             except stripe.StripeError as e:
                 self.error = e.message
                 return self.form_invalid(form)

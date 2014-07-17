@@ -64,6 +64,13 @@ Step 2: Specify exempt URLS:
 
 Using this example any request on this site that isn't on the homepage, about, accounts, or djstripe pages is redirected to ``djstripe.views.SubscribeFormView``/
 
+.. warning:: Adding app_names to applications.
+
+    To make the ``(allauth)`` work, you may need to define an app_name in the ``include()`` function in the URLConf. For example::
+
+        # in urls.py
+        url(r'^accounts/', include('allauth.urls',  app_name="allauth")),
+
 .. seealso::
 
     * :doc:`settings`
@@ -182,6 +189,22 @@ Described is an anti-pattern. View logic belongs in views.py, not urls.py.
 
 Subscriptions + Registration
 =============================
+
+.. warning:: Deprecation Warning!
+
+    Because this combines identity and financial submissions in one form, it's
+    arguably a security risk. Instead, we recommend using the standard two-stage
+    registration process, where personal info is gathered on one page, and CC 
+    information on the next.
+
+    Therefore, using this technique will trigger a deprecation warning while in 
+    DEBUG mode.
+
+    Discussion: 
+
+        * https://github.com/pydanny/dj-stripe/issues/86
+        * https://github.com/pydanny/dj-stripe/issues/92
+
 
 This requires the following additional requirements:
 
